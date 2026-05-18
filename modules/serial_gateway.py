@@ -774,6 +774,7 @@ class SerialTrafficProxy:
 					"last_up_payload": self._payload_preview(first_chunk),
 					"last_up_realtime_only": bool(self._is_realtime_only_payload(first_chunk)),
 					"last_nontransport_up_ts": time.time(),
+					"last_down_ts": time.time(),
 				}
 				target_write_lock = threading.Lock()
 				up = threading.Thread(target=self._pump, args=(client_sock, target_sock, "up", stop_event, stop_meta, session_activity, target_write_lock), daemon=True)
@@ -784,12 +785,18 @@ class SerialTrafficProxy:
 					with self._lock:
 						extend_on_rt = bool(self._passthrough_extend_on_realtime)
 						queue_item = dict(self._command_queue[0]) if self._command_queue else None
+					now_ts = time.time()
 					# LB disconnect detection: when LB closes its COM port, HW-VSP keeps the
 					# TCP connection alive but sends only fff1 transport-control frames.
-					# If no real (non-transport) traffic arrives for idle_timeout_s, close the
-					# session so the bridge returns to maintenance. Applies to both modes.
+					# Keep the passthrough alive while the target is still talking back; only
+					# close if both directions have been effectively idle for idle_timeout_s.
 					last_nontransport_ts = float(session_activity.get("last_nontransport_up_ts", 0.0))
-					if last_nontransport_ts > 0 and (time.time() - last_nontransport_ts) >= self._passthrough_idle_timeout_s:
+					last_down_ts = float(session_activity.get("last_down_ts", 0.0))
+					if (
+						last_nontransport_ts > 0
+						and (now_ts - last_nontransport_ts) >= self._passthrough_idle_timeout_s
+						and (last_down_ts <= 0 or (now_ts - last_down_ts) >= self._passthrough_idle_timeout_s)
+					):
 						stop_meta["reason"] = "transport_only_timeout"
 						stop_meta["where"] = "up"
 						stop_event.set()
@@ -797,7 +804,12 @@ class SerialTrafficProxy:
 					# Keepalive mode: idle timeout — LB is present but no real commands for a while.
 					if extend_on_rt:
 						last_up_ts = float(session_activity.get("last_up_ts", 0.0))
-						if last_up_ts > 0 and (time.time() - last_up_ts) >= self._passthrough_idle_timeout_s and self._client_socket_alive(client_sock):
+						if (
+							last_up_ts > 0
+							and (now_ts - last_up_ts) >= self._passthrough_idle_timeout_s
+							and (last_down_ts <= 0 or (now_ts - last_down_ts) >= self._passthrough_idle_timeout_s)
+							and self._client_socket_alive(client_sock)
+						):
 							stop_meta["reason"] = "idle_timeout"
 							stop_meta["where"] = "up"
 							stop_event.set()
@@ -816,6 +828,7 @@ class SerialTrafficProxy:
 									session_activity["last_up_ts"] = now_ts
 									session_activity["last_up_payload"] = self._payload_preview(payload)
 									session_activity["last_up_realtime_only"] = bool(self._is_realtime_only_payload(payload))
+									session_activity["last_nontransport_up_ts"] = now_ts
 									with self._lock:
 										if self._command_queue and int(self._command_queue[0].get("id", 0)) == int(queue_item.get("id", 0)):
 											self._command_queue.pop(0)
@@ -996,6 +1009,8 @@ class SerialTrafficProxy:
 						session_activity["last_nontransport_up_ts"] = now
 					if not transport_only and (not realtime_only or extend_on_rt):
 						session_activity["last_up_ts"] = now
+				elif direction == "down" and session_activity is not None:
+					session_activity["last_down_ts"] = now
 				with self._lock:
 					if direction == "up":
 						self._last_target_tx_ts = now
