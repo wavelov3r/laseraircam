@@ -346,7 +346,7 @@ class SerialTrafficProxy:
 		self._listen_socket = None
 		self._maintenance_socket = None
 		self._maintenance_poll_interval_s = 1.0
-		self._passthrough_idle_timeout_s = 5.0
+		self._passthrough_idle_timeout_s = 45.0
 		self._passthrough_extend_on_realtime = False
 		self._last_poll_ts = 0.0
 		self._client_threads = []
